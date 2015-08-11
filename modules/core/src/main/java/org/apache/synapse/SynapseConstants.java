@@ -341,6 +341,7 @@ public final class SynapseConstants {
     public static final String HTTP_SENDER_STATUSCODE = "transport.http.statusCode";
     public static final String BLOCKING_SENDER_PRESERVE_REQ_HEADERS =
             "BLOCKING_SENDER_PRESERVE_REQ_HEADERS";
+    public static final String DISABLE_CHUNKING = "DISABLE_CHUNKING";
 
     /** Synapse server instance name */
     public static final String SERVER_NAME = "serverName";
@@ -490,8 +491,20 @@ public final class SynapseConstants {
     public static final String IS_INBOUND = "isInbound";
     public static final String IS_CXF_WS_RM="is_cxf_ws_rm";
     public static final String INBOUND_PROXY_SERVICE_PARAM="inbound.only";
-
+    public static final String INBOUND_JMS_PROTOCOL = "INBOUND_JMS_PROTOCOL";
+    
     //Sandesha
     public static final String SANDESHA2_SEQUENCE_KEY = "Sandesha2SequenceKey";
+
+
+    //Synapse concurrency throttling
+    public static final String SYNAPSE_CONCURRENCY_THROTTLE =
+            "synapse.concurrency.throttle";
+    public static final String SYNAPSE_CONCURRENCY_THROTTLE_KEY =
+            "synapse.concurrency.throttle.key";
+    public static final String SYNAPSE_CONCURRENT_ACCESS_CONTROLLER =
+            "synapse.concurrent.access.controller";
+    public static final String SYNAPSE_CONCURRENT_ACCESS_REPLICATOR =
+            "synapse.concurrent.access.replicator";
 
 }

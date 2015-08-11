@@ -202,10 +202,10 @@ public class NhttpConstants {
     public static final String SERVER_WORKER_THREAD_ID = "SERVER_WORKER_THREAD_ID";
 
     /**
-     * Default interval which checks any configuration file updates for Dynamic SSL Profiles
-     * Default value is one hour in milliseconds.
+     * Default minimum interval which checks any configuration file updates for Dynamic SSL Profiles
+     * Default value is one minute in milliseconds.
      */
-    public static final int DYNAMIC_PROFILE_RELOAD_DEFAULT_INTERVAL = 3600000;
+    public static final int DYNAMIC_PROFILE_RELOAD_DEFAULT_INTERVAL = 60000;
 
 	/**
 	 * Http method type constants to be used in synapse
@@ -221,4 +221,14 @@ public class NhttpConstants {
 	 * Holds the method type of the incoming request
 	 */
 	public static final String HTTP_REQUEST_METHOD = "HTTP_REQUEST_METHOD";
+
+    /**
+     * X509 certificate chain for Mutual SSL connections
+     */
+    public static final String SSL_CLIENT_AUTH_CERT_X509 = "ssl.client.auth.cert.X509";
+
+    /**
+     * axis2 configuration to enable Mutual SSL - verify client's certificate
+     */
+    public static final String SSL_VERIFY_CLIENT = "SSLVerifyClient";
 }

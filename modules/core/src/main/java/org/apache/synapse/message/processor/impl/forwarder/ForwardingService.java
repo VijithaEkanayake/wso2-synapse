@@ -77,6 +77,9 @@ public class ForwardingService implements Task, ManagedLifecycle {
 	// Sequence to reply on success
 	private String replySeq = null;
 
+	// Sequence to invoke in a message processor deactivation
+	private String deactivateSeq = null;
+
     private String targetEndpoint = null;
     
 	/*
@@ -120,13 +123,6 @@ public class ForwardingService implements Task, ManagedLifecycle {
 	 * the message processor after maximum number of delivery
 	 */
 	private boolean isMaxDeliveryAttemptDropEnabled = false;
-
-	/**
-	 * If false, the MessageProcessor will process every single message in the queue regardless of their origin
-	 * If true, it will only process messages that were processed by a MessageStore running on the same server
-	 * Default value is set to true
-	 */
-	private boolean bindProcToServer = true;
     
 	private SynapseEnvironment synapseEnvironment;
 
@@ -156,22 +152,11 @@ public class ForwardingService implements Task, ManagedLifecycle {
 		}
 		do {
 			resetService();
+			MessageContext messageContext = null;
 			try {
 				if (!this.messageProcessor.isDeactivated()) {
-					MessageContext messageContext = fetch(messageConsumer);
+					messageContext = fetch(messageConsumer);
 					if (messageContext != null) {
-
-						if (bindProcToServer) {
-							String serverName = (String) messageContext.getProperty(SynapseConstants.Axis2Param.SYNAPSE_SERVER_NAME);
-							if (serverName != null && messageContext instanceof Axis2MessageContext) {
-								AxisConfiguration configuration = ((Axis2MessageContext) messageContext).getAxis2MessageContext()
-								                                                                        .getConfigurationContext().getAxisConfiguration();
-								String myServerName = getAxis2ParameterValue(configuration,SynapseConstants.Axis2Param.SYNAPSE_SERVER_NAME);
-								if (!serverName.equals(myServerName)) {
-									return;
-								}
-							}
-						}
 
 						Set proSet = messageContext.getPropertyKeySet();
 						if (proSet != null) {
@@ -216,7 +201,7 @@ public class ForwardingService implements Task, ManagedLifecycle {
 				 */
 				log.fatal("Deactivating the message processor [" + this.messageProcessor.getName() +
 				          "]", e);
-				this.messageProcessor.deactivate();
+				deactivateMessageProcessor(messageContext);
 			}
 
 			if (log.isDebugEnabled()) {
@@ -307,13 +292,9 @@ public class ForwardingService implements Task, ManagedLifecycle {
 
 		faultSeq = (String) parametersMap.get(ForwardingProcessorConstants.FAULT_SEQUENCE);
 
-		targetEndpoint = (String) parametersMap.get(ForwardingProcessorConstants.TARGET_ENDPOINT);
+		deactivateSeq = (String) parametersMap.get(ForwardingProcessorConstants.DEACTIVATE_SEQUENCE);
 
-		// Default value should be true
-		Object status;
-		if ((status = parametersMap.get(ForwardingProcessorConstants.BIND_PROCESSOR_TO_SERVER)) != null) {
-			bindProcToServer = Boolean.parseBoolean(status.toString());
-		}
+		targetEndpoint = (String) parametersMap.get(ForwardingProcessorConstants.TARGET_ENDPOINT);
 
 		// Default value should be true.
 		if (parametersMap.get(ForwardingProcessorConstants.THROTTLE) != null) {
@@ -358,7 +339,7 @@ public class ForwardingService implements Task, ManagedLifecycle {
         if (nonRetryStatusCodes != null) {
             for (String code : nonRetryStatusCodes) {
                 try {
-                    int codeI = Integer.parseInt(code);
+                    int codeI = Integer.parseInt(code.trim());
                     nonRetryCodes.add(codeI);
                 } catch (NumberFormatException e) {
                 } // ignore the invalid status code
@@ -504,14 +485,8 @@ public class ForwardingService implements Task, ManagedLifecycle {
 					if (!isSuccessful) {
 						// Then we have to retry sending the message to the
 						// client.
-						prepareToRetry();
-					} else {
-						if (messageProcessor.isPaused()) {
-							this.messageProcessor.resumeService();
-							log.info("Resuming the service of message processor [" +
-							         messageProcessor.getName() + "]");
-						}
-					}
+						prepareToRetry(messageContext);
+					} 
 				}
 			} catch (Exception e) {
 				log.error("Message processor [" + messageProcessor.getName() +
@@ -557,6 +532,28 @@ public class ForwardingService implements Task, ManagedLifecycle {
 	}
 
 	/**
+	 * Sending the out message through the deactivate sequence.
+	 *
+	 * @param msgCtx Synapse {@link MessageContext} to be sent through the deactivate
+	 *               sequence.
+	 */
+	public void sendThroughDeactivateSeq(MessageContext msgCtx) {
+		if (deactivateSeq == null) {
+			log.warn("Failed to send the message through the deactivate sequence. Sequence name does not Exist.");
+			return;
+		}
+		Mediator mediator = msgCtx.getSequence(deactivateSeq);
+
+		if (mediator == null) {
+			log.warn("Failed to send the message through the deactivate sequence. Sequence [" +
+			         deactivateSeq + "] does not Exist.");
+			return;
+		}
+
+		mediator.mediate(msgCtx);
+	}
+
+	/**
 	 * Sending the out message through the reply sequence.
 	 * 
 	 * @param outCtx
@@ -565,14 +562,14 @@ public class ForwardingService implements Task, ManagedLifecycle {
 	 */
 	public void sendThroughReplySeq(MessageContext outCtx) {
 		if (replySeq == null) {
-			this.messageProcessor.deactivate();
+			deactivateMessageProcessor(outCtx);
 			log.error("Failed to send the out message. Reply sequence does not Exist. Deactivated the message processor");
 			return;
 		}
 		Mediator mediator = outCtx.getSequence(replySeq);
 
 		if (mediator == null) {
-			this.messageProcessor.deactivate();
+			deactivateMessageProcessor(outCtx);
 			log.error("Failed to send the out message. Reply sequence [" + replySeq +
 			          "] does not exist. Deactivated the message processor");
 			return;
@@ -609,8 +606,8 @@ public class ForwardingService implements Task, ManagedLifecycle {
 	 * processor. If the MaxDeliveryAttemptDrop is Enabled, then the message is
 	 * dropped and the message processor continues.
 	 */
-    private void checkAndDeactivateProcessor() {
-        if (maxDeliverAttempts > 0) {
+	private void checkAndDeactivateProcessor(MessageContext msgCtx) {
+		if (maxDeliverAttempts > 0) {
             this.attemptCount++;
             if (attemptCount >= maxDeliverAttempts) {
           
@@ -621,8 +618,8 @@ public class ForwardingService implements Task, ManagedLifecycle {
                                 "] Dropped the failed message and continue due to reach of max attempts");
                     }
                 } else {
-                    terminate();
-                    this.messageProcessor.deactivate();
+	                terminate();
+	                deactivateMessageProcessor(msgCtx);
 
                     if (log.isDebugEnabled()) {
                         log.debug("Message processor [" + messageProcessor.getName() +
@@ -637,21 +634,9 @@ public class ForwardingService implements Task, ManagedLifecycle {
 	/*
 	 * Prepares the message processor for the next retry of delivery.
 	 */
-	private void prepareToRetry() {
+	private void prepareToRetry(MessageContext msgCtx) {
 		if (!isTerminated) {
-			/*
-			 * First stop the processor since no point in re-triggering jobs if
-			 * the we can't send
-			 * it to the client
-			 */
-			if (!messageProcessor.isPaused()) {
-				this.messageProcessor.pauseService();
-
-				log.info("Pausing the service of message processor [" + messageProcessor.getName() +
-				         "]");
-			}
-
-			checkAndDeactivateProcessor();
+			checkAndDeactivateProcessor(msgCtx);
 
 			if (log.isDebugEnabled()) {
 				log.debug("Failed to send to client retrying after " + retryInterval +
@@ -665,6 +650,11 @@ public class ForwardingService implements Task, ManagedLifecycle {
 				// No harm even it gets interrupted. So nothing to handle.
 			}
 		}
+	}
+
+	private void deactivateMessageProcessor(MessageContext messageContext) {
+		sendThroughDeactivateSeq(messageContext);
+		this.messageProcessor.deactivate();
 	}
 
     private void resetService() {
@@ -694,9 +684,6 @@ public class ForwardingService implements Task, ManagedLifecycle {
 		messageConsumer.ack();
 		attemptCount = 0;
 		isSuccessful = true;
-		if (this.messageProcessor.isPaused()) {
-			this.messageProcessor.resumeService();
-		}
 		log.info("Removed failed message and continue the message processor [" +
 		         this.messageProcessor.getName() + "]");
 	}
