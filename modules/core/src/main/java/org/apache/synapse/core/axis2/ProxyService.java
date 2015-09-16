@@ -37,6 +37,7 @@ import org.apache.synapse.MessageContext;
 import org.apache.synapse.SynapseArtifact;
 import org.apache.synapse.SynapseConstants;
 import org.apache.synapse.SynapseException;
+import org.apache.synapse.transport.customlogsetter.CustomLogSetter;
 import org.apache.synapse.aspects.AspectConfigurable;
 import org.apache.synapse.aspects.AspectConfiguration;
 import org.apache.synapse.config.SynapseConfigUtils;
@@ -98,6 +99,7 @@ public class ProxyService implements AspectConfigurable, SynapseArtifact {
     public static final String ABSOLUTE_SCHEMA_URL_PARAM = "showAbsoluteSchemaURL";
     public static final String ABSOLUTE_PROXY_SCHEMA_URL_PARAM = "showProxySchemaURL";
     public static final String ENGAGED_MODULES = "engagedModules";
+    private static final String NO_SECURITY_POLICY = "NoSecurity";
 
     /**
      * The name of the proxy service
@@ -233,6 +235,10 @@ public class ProxyService implements AspectConfigurable, SynapseArtifact {
     private boolean moduleEngaged;
 
     private boolean wsdlPublished;
+
+    private String artifactContainerName;
+
+    private boolean isEdited;
 
     /**
      * Constructor
@@ -594,24 +600,32 @@ public class ProxyService implements AspectConfigurable, SynapseArtifact {
             }
         }
 
+        boolean isNoSecPolicy = false;
         if (!policies.isEmpty()) {
 
             for (PolicyInfo pi : policies) {
-                if (getPolicyFromKey(pi.getPolicyKey(), synCfg) == null) {
+
+                Policy policy = getPolicyFromKey(pi.getPolicyKey(), synCfg);
+
+                if (policy == null) {
                     handleException("Cannot find Policy from the key");
+                }
+
+                if (NO_SECURITY_POLICY.equals(policy.getId())) {
+                    isNoSecPolicy = true;
+                    log.info("NoSecurity Policy found, skipping policy attachment");
+                    continue;
                 }
 
                 if (pi.isServicePolicy()) {
 
-                    proxyService.getPolicySubject().attachPolicy(
-                            getPolicyFromKey(pi.getPolicyKey(), synCfg));
+                    proxyService.getPolicySubject().attachPolicy(policy);
 
                 } else if (pi.isOperationPolicy()) {
 
                     AxisOperation op = proxyService.getOperation(pi.getOperation());
                     if (op != null) {
-                        op.getPolicySubject().attachPolicy(
-                                getPolicyFromKey(pi.getPolicyKey(), synCfg));
+                        op.getPolicySubject().attachPolicy(policy);
 
                     } else {
                         handleException("Couldn't find the operation specified " +
@@ -624,8 +638,7 @@ public class ProxyService implements AspectConfigurable, SynapseArtifact {
 
                         AxisOperation op = proxyService.getOperation(pi.getOperation());
                         if (op != null) {
-                            op.getMessage(pi.getMessageLable()).getPolicySubject().attachPolicy(
-                                    getPolicyFromKey(pi.getPolicyKey(), synCfg));
+                            op.getMessage(pi.getMessageLable()).getPolicySubject().attachPolicy(policy);
                         } else {
                             handleException("Couldn't find the operation " +
                                     "specified by the QName : " + pi.getOperation());
@@ -644,8 +657,7 @@ public class ProxyService implements AspectConfigurable, SynapseArtifact {
 
                                     AxisMessage message = ((AxisOperation)
                                             obj).getMessage(pi.getMessageLable());
-                                    message.getPolicySubject().attachPolicy(
-                                            getPolicyFromKey(pi.getPolicyKey(), synCfg));
+                                    message.getPolicySubject().attachPolicy(policy);
                                 }
                             }
                         }
@@ -713,18 +725,22 @@ public class ProxyService implements AspectConfigurable, SynapseArtifact {
         }
 
         // should Security be engaged on this service?
-        if (wsSecEnabled) {
+        boolean secModuleEngaged = false;
+        if (wsSecEnabled && !isNoSecPolicy) {
             auditInfo("WS-Security is enabled for service : " + name);
             try {
                 proxyService.engageModule(axisCfg.getModule(
                     SynapseConstants.SECURITY_MODULE_NAME), axisCfg);
+                secModuleEngaged = true;
             } catch (AxisFault axisFault) {
                 handleException("Error loading WS Sec module on proxy service : "
                         + name, axisFault);
             }
+        } else if (isNoSecPolicy) {
+            log.info("NoSecurity Policy found, skipping rampart engagement");
         }
 
-        moduleEngaged = wsSecEnabled || wsAddrEnabled;
+        moduleEngaged = secModuleEngaged || wsAddrEnabled;
         wsdlPublished = wsdlFound;
 
         //Engaging Axis2 modules
@@ -838,8 +854,7 @@ public class ProxyService implements AspectConfigurable, SynapseArtifact {
             this.setRunning(true);
             auditInfo("Started the proxy service : " + name);
         } else {
-            auditWarn("Unable to start proxy service : " + name +
-                ". Couldn't access Axis configuration");
+            auditWarn("Unable to start proxy service : " + name + ". Couldn't access Axis configuration");
         }
     }
 
@@ -871,7 +886,7 @@ public class ProxyService implements AspectConfigurable, SynapseArtifact {
             auditInfo("Stopped the proxy service : " + name);
         } else {
             auditWarn("Unable to stop proxy service : " + name +
-                ". Couldn't access Axis configuration");
+                    ". Couldn't access Axis configuration");
         }
     }
 
@@ -1272,6 +1287,22 @@ public class ProxyService implements AspectConfigurable, SynapseArtifact {
 
     }
 
+    public void setArtifactContainerName (String name) {
+        artifactContainerName = name;
+    }
+
+    public String getArtifactContainerName () {
+        return artifactContainerName;
+    }
+
+    public boolean isEdited() {
+        return isEdited;
+    }
+
+    public void setIsEdited(boolean isEdited) {
+        this.isEdited = isEdited;
+    }
+
     private String[] getModuleNames(String propertyValue) {
 
         if (propertyValue == null || propertyValue.trim().isEmpty()) {
@@ -1294,5 +1325,9 @@ public class ProxyService implements AspectConfigurable, SynapseArtifact {
 
     public void setPublishWSDLEndpoint(String publishWSDLEndpoint) {
         this.publishWSDLEndpoint = publishWSDLEndpoint;
+    }
+
+    public void setLogSetterValue () {
+        CustomLogSetter.getInstance().setLogAppender(artifactContainerName);
     }
 }

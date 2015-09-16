@@ -112,14 +112,6 @@ public abstract class ScheduledMessageProcessor extends AbstractMessageProcessor
          */
         this.start();
 
-        /*
-         * If the Message Processor is Deactivated through the Advanced parameter 
-         * explicitly, then we deactivate the task immediately.
-         */
-        if (!getIsActivatedParamValue()) {
-            deactivate();
-        }
-
 	}
 
     /*
@@ -127,7 +119,7 @@ public abstract class ScheduledMessageProcessor extends AbstractMessageProcessor
      * IsActivated property resides under the Advanced parameters section of the
      * Message Processor.
      */
-    private boolean getIsActivatedParamValue() {
+    public boolean getIsActivatedParamValue() {
         Object isActiveParam = parameters.get(MessageProcessorConstants.IS_ACTIVATED);
         // Message Processor is ACTIVATED by default.
         boolean isActivated = true;
@@ -135,6 +127,10 @@ public abstract class ScheduledMessageProcessor extends AbstractMessageProcessor
             isActivated = Boolean.parseBoolean(String.valueOf(isActiveParam));
         }
         return isActivated;
+    }
+
+    protected boolean isProcessorStartAsDeactivated(){
+        return !getIsActivatedParamValue();
     }
 
     @Override
@@ -173,9 +169,19 @@ public abstract class ScheduledMessageProcessor extends AbstractMessageProcessor
 				taskDescription.setCronExpression(cronExpression);
 			}
 			taskManager.schedule(taskDescription);
+		
 		}
 		
+		
         logger.info("Started message processor. [" + getName() + "].");
+        
+        /*
+         * If the Message Processor is Deactivated through the Advanced parameter 
+         * explicitly, then we deactivate the task immediately.
+         */
+        if (!getIsActivatedParamValue()) {
+            deactivate();
+        }
         return true;
 	}
 
@@ -223,6 +229,17 @@ public abstract class ScheduledMessageProcessor extends AbstractMessageProcessor
 		 * therefore not started but initiated.
 		 */
 		if (taskManager != null && taskManager.isInitialized()) {
+            /*
+             * If the task is already deleted, then it does not exist any more.
+             * Therefore no point of deleting it again. Hence merely returning.
+             * This situation arises when a MP is deleted from the manager node
+             * in a cluster setup. Then the deployment engine will eventually
+             * call the destroy method in all workers, leading to delete an
+             * already deleted task. This leads to unnecessary exceptions.
+             */
+            if (!taskManager.isTaskExist(TASK_PREFIX + name + DEFAULT_TASK_SUFFIX)) {
+                return false;
+            }
 			for (int i = 0; i < memberCount; i++) {
 				/*
 				 * This is to immediately stop the scheduler to avoid firing new
@@ -282,10 +299,7 @@ public abstract class ScheduledMessageProcessor extends AbstractMessageProcessor
                 logger.error("The thread was interrupted while sleeping");
             }
             if (getMessageConsumer() != null && messageConsumers.size() > 0) {
-                boolean success = getMessageConsumer().get(0).cleanup();
-                if (!success) {
-                    logger.error("[" + getName() + "] Could not cleanup message consumer.");
-                }
+                cleanupLocalResources();
             } else {
                 logger.warn("[" + getName() + "] Could not find the message consumer to cleanup.");
             }
@@ -318,9 +332,7 @@ public abstract class ScheduledMessageProcessor extends AbstractMessageProcessor
                  * This will close the connection with the JMS Provider/message
                  * store.
                  */
-                if (messageConsumers != null && messageConsumers.size() > 0) {
-                    messageConsumers.get(0).cleanup();
-                }
+                cleanupLocalResources();
 
                 /*
                  * Cleaning up the resources in the cluster mode here.
@@ -444,9 +456,6 @@ public abstract class ScheduledMessageProcessor extends AbstractMessageProcessor
     @Override
     public void update() {
 	    start();
-	    if (!getIsActivatedParamValue()) {
-		    deactivate();
-	    }
     }
 
     @Override

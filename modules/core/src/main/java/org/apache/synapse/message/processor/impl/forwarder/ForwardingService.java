@@ -18,10 +18,14 @@
 
 package org.apache.synapse.message.processor.impl.forwarder;
 
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Date;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
 import org.apache.axiom.om.OMElement;
 import org.apache.axiom.soap.SOAPEnvelope;
@@ -42,6 +46,7 @@ import org.apache.synapse.endpoints.Endpoint;
 import org.apache.synapse.message.MessageConsumer;
 import org.apache.synapse.message.processor.MessageProcessor;
 import org.apache.synapse.message.processor.MessageProcessorConstants;
+import org.apache.synapse.message.processor.impl.ScheduledMessageProcessor;
 import org.apache.synapse.message.senders.blocking.BlockingMsgSender;
 import org.apache.synapse.message.store.impl.jms.JmsConsumer;
 import org.apache.synapse.task.Task;
@@ -101,11 +106,11 @@ public class ForwardingService implements Task, ManagedLifecycle {
 	private volatile boolean isTerminated = false;
 
 	/*
-	 * Number of retries before shutting-down the processor. -1 default value
+	 * Number of retries before shutting-down the processor. -1 value
 	 * indicates that
 	 * retry should happen forever
 	 */
-	private int maxDeliverAttempts = -1;
+	private int maxDeliverAttempts = 4;
 	private int attemptCount = 0;
 
     private boolean isThrottling = true;
@@ -127,6 +132,25 @@ public class ForwardingService implements Task, ManagedLifecycle {
 	private SynapseEnvironment synapseEnvironment;
 
 	private boolean initialized = false;
+
+    /**
+     * Specifies whether the service should be started as deactivated or not
+     */
+    private boolean isDeactivatedAtStartup= false;
+	
+    /*
+     * Defines HTTP Status code prefixes which are defined as errors. For an
+     * example 400 and 500 status codes are considered as errors in general.
+     */
+    private static final List<String> ERROR_HTTP_SC_PREFIX =
+                                                             new ArrayList<String>(
+                                                                                   Arrays.asList("4",
+                                                                                                 "5"));
+    /*
+     * Defines other HTTP status codes which are considered as errors which does
+     * not belong to 400 or 500 errors.
+     */
+    private static final List<String> ERROR_HTTP_SC = new ArrayList<String>(Arrays.asList("301"));
 	
 	public ForwardingService(MessageProcessor messageProcessor, BlockingMsgSender sender,
 	                         SynapseEnvironment synapseEnvironment, long threshouldInterval) {
@@ -137,12 +161,33 @@ public class ForwardingService implements Task, ManagedLifecycle {
 		this.interval = threshouldInterval;
 	}
 
-	/**
+    public ForwardingService(MessageProcessor messageProcessor, BlockingMsgSender sender,
+                             SynapseEnvironment synapseEnvironment, long threshouldInterval,
+                             boolean isDeactivatedAtStartup ) {
+        this.messageProcessor = messageProcessor;
+        this.sender = sender;
+        this.synapseEnvironment = synapseEnvironment;
+        this.interval = threshouldInterval;
+        this.isDeactivatedAtStartup = isDeactivatedAtStartup;
+    }
+
+    /**
 	 * Starts the execution of this task which grabs a message from the message
 	 * queue and dispatch it to a given endpoint.
 	 */
 	public void execute() {
 		final long startTime = new Date().getTime();
+
+        if(isDeactivatedAtStartup){
+            //This delay is required until tasks are paused from ScheduledMessageProcessor since message processor is
+            // inactive
+            try {
+                TimeUnit.MILLISECONDS.sleep(MessageProcessorConstants.INITIAL_EXECUTION_DELAY);
+            } catch (InterruptedException exception) {
+                log.warn("Initial delay interrupted when Forwarding service started as inactive ", exception);
+            }
+            isDeactivatedAtStartup = false;
+        }
 		/*
 		 * Initialize only if it is NOT already done. This will make sure that
 		 * the initialization is done only once.
@@ -220,29 +265,37 @@ public class ForwardingService implements Task, ManagedLifecycle {
 					log.debug("Current Thread was interrupted while it is sleeping.");
 				}
 			}
-			/*
-			 * If the interval is less than 1000 ms, then the scheduling is done
-			 * using the while loop since ntask rejects any intervals whose
-			 * value is less then 1000 ms.
-			 */
-			if (interval > 0 && interval < MessageProcessorConstants.THRESHOULD_INTERVAL) {
-				try {
-					Thread.sleep(interval);
-				} catch (InterruptedException e) {
-					log.debug("Current Thread was interrupted while it is sleeping.");
-				}
-			}
-			/*
-			 * Gives the control back to Quartz scheduler. This needs to be done
-			 * only if the interval value is less than the Threshould interval
-			 * value of 1000 ms, where the scheduling is done outside of Quartz
-			 * via the while loop. Otherwise the schedular will get blocked.
-			 * For cron expressions this scenario is already
-			 * handled above.
-			 */
-			if (isThrottling && new Date().getTime() - startTime > 1000) {
-				break;
-			}
+            /*
+             * If the interval is less than 1000 ms, then the scheduling is done
+             * using the while loop since ntask rejects any intervals whose
+             * value is less then 1000 ms. Cron expressions are handled above so
+             * we need to skip it here. Otherwise the cron expression is kept
+             * sleeping twice as the forwarding interval.
+             */
+            if (interval > 0 && interval < MessageProcessorConstants.THRESHOULD_INTERVAL &&
+                !isRunningUnderCronExpression()) {
+                try {
+                    Thread.sleep(interval);
+                } catch (InterruptedException e) {
+                    log.debug("Current Thread was interrupted while it is sleeping.");
+                }
+            }
+            /*
+             * Gives the control back to Quartz scheduler. This needs to be done
+             * only if the interval value is less than the Threshould interval
+             * value of 1000 ms, where the scheduling is done outside of Quartz
+             * via the while loop. Otherwise the schedular will get blocked.
+             * For cron expressions with interval < 1000ms this scenario is not
+             * applicable hence skipping it here. For cron expressions, all the
+             * messages in the queue at the moment are sent to the backend. If
+             * you give control back to the Quartz that behavior can not be
+             * achieved, only a portion of the messages will get dispatched
+             * while other messages will remain in the queue.
+             */
+            if (isThrottling && new Date().getTime() - startTime > 1000 &&
+                !isRunningUnderCronExpression()) {
+                break;
+            }
 		} while ((isThrottling || isRunningUnderCronExpression()) && !isTerminated);
 
 		if (log.isDebugEnabled()) {
@@ -365,9 +418,9 @@ public class ForwardingService implements Task, ManagedLifecycle {
 	 * 
 	 * @param messageContext
 	 *            synapse {@link MessageContext} to be sent
-	 */
-	public void dispatch(MessageContext messageContext) {
-		if (log.isDebugEnabled()) {
+     */
+    public void dispatch(MessageContext messageContext) {
+        if (log.isDebugEnabled()) {
 			log.debug("Sending the message to client with message processor [" +
 			          messageProcessor.getName() + "]");
 		}
@@ -455,18 +508,30 @@ public class ForwardingService implements Task, ManagedLifecycle {
 									sendThroughFaultSeq(outCtx);
 								}
 							} else {
+	                             isSuccessful = !isErrorHttpSC(String.valueOf(outCtx.getProperty(SynapseConstants.HTTP_SC)));
 								// Send the message down the reply sequence if
 								// there is one
-								sendThroughReplySeq(outCtx);
-								messageConsumer.ack();
-								attemptCount = 0;
-								isSuccessful = true;
+							    
+                                if (isSuccessful) {
+	                                sendThroughReplySeq(outCtx);
+	                                messageConsumer.ack();
+	                                attemptCount = 0;
+	                                isSuccessful = true;
 
-								if (log.isDebugEnabled()) {
-									log.debug("Successfully sent the message to endpoint [" +
-									          ep.getName() + "]" + " with message processor [" +
-									          messageProcessor.getName() + "]");
-								}
+	                                if (log.isDebugEnabled()) {
+	                                    log.debug("Successfully sent the message to endpoint [" +
+	                                              ep.getName() + "]" + " with message processor [" +
+	                                              messageProcessor.getName() + "]");
+	                                }
+                                } else {
+                                    // This means some error has occurred so
+                                    // must try to send down the fault sequence.
+                                    log.error("BlockingMessageSender of message processor [" +
+                                              this.messageProcessor.getName() +
+                                              " received the ERROR HTTP SC: " + outCtx.getProperty(SynapseConstants.HTTP_SC));
+                                    sendThroughFaultSeq(outCtx);
+                                }
+
 							}
 						} else {
 							// This Means we have invoked an out only operation
@@ -513,16 +578,16 @@ public class ForwardingService implements Task, ManagedLifecycle {
 	 * 
 	 * @param msgCtx
 	 *            Synapse {@link MessageContext} to be sent through the fault
-	 *            sequence.
-	 */
-	public void sendThroughFaultSeq(MessageContext msgCtx) {
+     *            sequence.
+     */
+    public void sendThroughFaultSeq(MessageContext msgCtx) {
 		if (faultSeq == null) {
 			log.warn("Failed to send the message through the fault sequence. Sequence name does not Exist.");
-			return;
-		}
-		Mediator mediator = msgCtx.getSequence(faultSeq);
+            return;
+        }
+        Mediator mediator = msgCtx.getSequence(faultSeq);
 
-		if (mediator == null) {
+        if (mediator == null) {
 			log.warn("Failed to send the message through the fault sequence. Sequence [" +
 			         faultSeq + "] does not Exist.");
 			return;
@@ -675,6 +740,17 @@ public class ForwardingService implements Task, ManagedLifecycle {
 
         return isSuccess;
     }
+    
+    /*
+     * Checks whether a given HTTP status code is an error code or not. All the
+     * 400 status codes are client errors and 500 status codes are server
+     * errors. If the given status code is within 400 or 500 range it is
+     * considered as an error code in general.
+     */
+    private boolean isErrorHttpSC(String responseSC) {
+        return responseSC.startsWith(ERROR_HTTP_SC_PREFIX.get(0)) ||
+               responseSC.startsWith(ERROR_HTTP_SC_PREFIX.get(1)) || ERROR_HTTP_SC.contains(responseSC);
+    }
 
 	private boolean isRunningUnderCronExpression() {
 		return (cronExpression != null) && (throttlingInterval > -1);
@@ -693,6 +769,15 @@ public class ForwardingService implements Task, ManagedLifecycle {
 		messageConsumer =
 		                  synapseEnvironment.getSynapseConfiguration()
 		                                    .getMessageStore(messageStore).getConsumer();
+		
+        /*
+         * If Message Processor is deactivated via Advanced params, then we need
+         * to cleanup the JMS consumers here. Ideally a deactivated MP should
+         * not have any active JMS consumers.
+         */
+        if (!((ScheduledMessageProcessor) messageProcessor).getIsActivatedParamValue()) {
+            messageConsumer.cleanup();
+        }
 		/*
 		 * Make sure to set the same message consumer in the message processor
 		 * since it is used by life-cycle management methods. Specially by the
